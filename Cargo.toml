@@ -1,0 +1,74 @@
+[package]
+name = "eegdino"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+description = "EEG-DINO Foundation Model — inference in Rust with Burn ML"
+keywords      = ["eeg", "foundation-model", "BCI", "GPU", "deep-learning"]
+categories    = ["science", "algorithms"]
+authors       = ["Eugene Hauptmann"]
+license       = "MIT"
+readme        = "README.md"
+repository    = "https://github.com/eugenehp/eegdino-rs"
+homepage      = "https://github.com/eugenehp/eegdino-rs"
+documentation = "https://docs.rs/eegdino"
+
+exclude = [
+    "weights/*",
+    "tests/*",
+    "scripts/*",
+    "examples/*",
+    "ABLATION.md",
+]
+
+[lib]
+name = "eegdino_rs"
+path = "src/lib.rs"
+
+[[example]]
+name = "infer"
+path = "examples/infer.rs"
+
+[[example]]
+name = "parity_check"
+path = "examples/parity_check.rs"
+
+[[example]]
+name = "bench"
+path = "examples/bench.rs"
+
+[features]
+default = ["ndarray"]
+# CPU backend — Rayon multi-threading + SIMD
+ndarray         = ["dep:burn-ndarray", "burn/ndarray"]
+# macOS: Apple Accelerate BLAS (fast on Apple Silicon)
+blas-accelerate = ["burn-ndarray?/blas-accelerate"]
+# Linux: system OpenBLAS
+openblas-system = ["burn-ndarray?/blas-openblas-system"]
+# GPU backend — wgpu on Metal (macOS) or Vulkan (Linux)
+wgpu            = ["burn/wgpu"]
+# GPU backend with f16 (half-precision) — 2x less memory
+wgpu-f16        = ["wgpu"]
+
+[dependencies]
+burn = { version = "0.20.1", default-features = false, features = ["std", "simd"] }
+burn-ndarray = { version = "0.20.1", default-features = false, features = ["std", "simd", "multi-threads"], optional = true }
+
+safetensors = "0.7"
+half = "2"
+rustfft = "6"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
