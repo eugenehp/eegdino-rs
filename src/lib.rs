@@ -2,12 +2,12 @@
 //!
 //! Rust inference crate for the
 //! [EEG-DINO](https://github.com/miraclefish/EEG-DINO) foundation model,
-//! built on the [Burn](https://burn.dev) ML framework.
+//! built on [RLX](https://github.com/eugenehp/rlx).
 //!
 //! EEG-DINO learns robust EEG representations via hierarchical self-distillation
 //! on 9 000+ hours of EEG data.  This crate provides a faithful port of the
 //! encoder architecture with verified numerical parity (NRMSE < 1e-6) against
-//! the original PyTorch implementation.
+//! the original PyTorch implementation on CPU, Metal, and MLX backends.
 //!
 //! ## Model sizes
 //!
@@ -17,60 +17,72 @@
 //! | Medium  | 33 M   | 512     | 16    | 16     | 1 024   |
 //! | Large   | 201 M  | 1 024   | 16    | 24     | 2 048   |
 //!
-//! ## Quick start (builder)
+//! ## Quick start
 //!
 //! ```rust,ignore
 //! use eegdino_rs::prelude::*;
-//! use burn::backend::NdArray;
 //!
-//! type B = NdArray;
-//!
-//! let encoder = EegDinoEncoder::<B>::builder()
-//!     .weights("weights/eeg_dino_small.safetensors")
-//!     .size(ModelSize::Small)
-//!     .device(Default::default())
-//!     .build()?;
+//! let device = parse_device("metal")?; // cpu | metal | mlx | gpu
+//! let (mut encoder, load_ms) = EegDinoEncoder::load(
+//!     "weights/eeg_dino_small.safetensors".as_ref(),
+//!     None,
+//!     device,
+//! )?;
 //!
 //! let signal = vec![0.0f32; 19 * 2000];
 //! let result = encoder.encode_raw(&signal, 1, 19, 2000)?;
 //! // result.shape == [1, 191, 200]
 //! ```
 //!
-//! ## Batch encoding
-//!
-//! ```rust,ignore
-//! let signals: Vec<Vec<f32>> = load_recordings();
-//! // Single batched forward pass (fastest):
-//! let result = encoder.encode_batch(&signals, 19, 2000)?;
-//! // Or one-by-one:
-//! let results = encoder.encode_many(&signals, 19, 2000);
-//! ```
-//!
 //! ## Backends
 //!
-//! | Feature | Backend | Notes |
-//! |---------|---------|-------|
-//! | `ndarray` (default) | CPU | Multi-threaded via Rayon + SIMD |
-//! | `blas-accelerate` | CPU + Accelerate | Recommended on Apple Silicon |
-//! | `wgpu` | GPU | Metal (macOS) / Vulkan (Linux) |
-//! | `wgpu-f16` | GPU f16 | Half-precision, 2x less memory |
+//! | Feature / device | Backend | Notes |
+//! |------------------|---------|-------|
+//! | `cpu`, `rlx-cpu` | RLX CPU | Rayon + SIMD; default |
+//! | `metal` | Apple Metal / MPS | macOS |
+//! | `mlx` | Apple MLX | macOS |
+//! | `gpu`, `wgpu` | RLX wgpu | Metal/Vulkan/DX12 (parity vs CPU in progress) |
+//!
+//! Enable all with `--features all-backends`.
+
+#[cfg(not(feature = "rlx"))]
+compile_error!("the `rlx` feature is required (enabled by default)");
 
 pub mod config;
 pub mod error;
-pub mod model;
-pub(crate) mod weights;
-pub mod inference;
 pub mod prelude;
+pub mod rlx;
 
 pub use config::{ModelConfig, ModelSize};
 pub use error::{EegDinoError, Result};
-pub use inference::{
+
+pub use rlx::{
+    detect_model_size, device_label, feature_for, is_device_available, parse_device,
     EegDinoEncoder, EegDinoEncoderBuilder, EncodingResult,
-    EegDinoClassifier, ClassificationResult,
-    detect_model_size,
 };
-pub use model::encoder::EEGEncoder;
+
+#[cfg(feature = "burn")]
+pub mod model;
+
+#[cfg(feature = "burn")]
+pub(crate) mod weights;
+
+#[cfg(feature = "burn")]
+pub mod inference;
+
+#[cfg(feature = "burn")]
+pub use inference::{
+    ClassificationResult, EegDinoClassifier, EegDinoEncoder as BurnEegDinoEncoder,
+    EegDinoEncoderBuilder as BurnEegDinoEncoderBuilder, EncodingResult as BurnEncodingResult,
+};
+
+#[cfg(feature = "burn")]
 pub use model::classifier::ClassificationModel;
+
+#[cfg(feature = "burn")]
+pub use model::encoder::EEGEncoder;
+
+#[cfg(feature = "burn")]
 pub use model::embedding::{EmbeddingCache, PatchEmbedding};
 
 /// Configure the Rayon thread pool.  Call once before model use.

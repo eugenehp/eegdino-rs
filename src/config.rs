@@ -93,9 +93,8 @@ impl ModelConfig {
     /// Load config from a JSON file.
     pub fn from_file(path: &std::path::Path) -> crate::error::Result<Self> {
         let data = std::fs::read_to_string(path)?;
-        serde_json::from_str(&data).map_err(|e| {
-            crate::error::EegDinoError::WeightLoad(format!("config parse error: {e}"))
-        })
+        serde_json::from_str(&data)
+            .map_err(|e| crate::error::EegDinoError::WeightLoad(format!("config parse error: {e}")))
     }
 
     /// Head dimension (feature_size / num_heads).

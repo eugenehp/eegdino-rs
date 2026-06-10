@@ -1,13 +1,13 @@
-pub mod embedding;
 pub mod attention;
+pub mod classifier;
+pub mod embedding;
+pub mod encoder;
 pub mod mlp;
 pub mod transformer;
-pub mod encoder;
-pub mod classifier;
 
-use burn::prelude::*;
 use burn::module::{Param, ParamId};
 use burn::nn::Linear;
+use burn::prelude::*;
 
 /// Create a [`Linear`] layer with zero-filled weights.
 ///
@@ -19,10 +19,7 @@ pub fn linear_zeros<B: Backend>(
     bias: bool,
     device: &B::Device,
 ) -> Linear<B> {
-    let weight = Param::initialized(
-        ParamId::new(),
-        Tensor::zeros([d_input, d_output], device),
-    );
+    let weight = Param::initialized(ParamId::new(), Tensor::zeros([d_input, d_output], device));
     let bias = if bias {
         Some(Param::initialized(
             ParamId::new(),

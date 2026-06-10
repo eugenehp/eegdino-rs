@@ -1,3 +1,5 @@
+use burn::module::Param;
+use burn::nn::Linear;
 /// Multi-head self-attention with fused QKV bias.
 ///
 /// Matches the Python `Attention` class in `models/transformer.py`.
@@ -7,8 +9,6 @@
 /// separate Q/V biases into the Linear's bias field, so forward needs no
 /// per-call allocation.
 use burn::prelude::*;
-use burn::module::Param;
-use burn::nn::Linear;
 
 use super::linear_zeros;
 
@@ -57,10 +57,7 @@ impl<B: Backend> Attention<B> {
         let device = self.q_bias.val().device();
         let k_bias = Tensor::<B, 1>::zeros([dim], &device);
         let fused = Tensor::cat(vec![self.q_bias.val(), k_bias, self.v_bias.val()], 0);
-        self.qkv.bias = Some(Param::initialized(
-            burn::module::ParamId::new(),
-            fused,
-        ));
+        self.qkv.bias = Some(Param::initialized(burn::module::ParamId::new(), fused));
     }
 
     /// `x`: `[B, N, dim]` → `[B, N, dim]`
@@ -88,12 +85,10 @@ impl<B: Backend> Attention<B> {
         let v = qkv.narrow(0, 2, 1).reshape([b, h, n, d]);
 
         // Scaled dot-product attention
-        let attn = burn::tensor::activation::softmax(
-            (q * self.scale).matmul(k.transpose()),
-            3,
-        );
+        let attn = burn::tensor::activation::softmax((q * self.scale).matmul(k.transpose()), 3);
 
         // [B, H, N, D] → [B, N, HD]
-        self.proj.forward(attn.matmul(v).permute([0, 2, 1, 3]).reshape([b, n, h * d]))
+        self.proj
+            .forward(attn.matmul(v).permute([0, 2, 1, 3]).reshape([b, n, h * d]))
     }
 }

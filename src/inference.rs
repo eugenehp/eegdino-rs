@@ -12,9 +12,9 @@ use burn::prelude::*;
 
 use crate::config::{ModelConfig, ModelSize};
 use crate::error::{EegDinoError, Result};
+use crate::model::classifier::ClassificationModel;
 use crate::model::embedding::EmbeddingCache;
 use crate::model::encoder::EEGEncoder;
-use crate::model::classifier::ClassificationModel;
 use crate::weights;
 
 // ── Result types ────────────────────────────────────────────────────────────
@@ -62,7 +62,12 @@ pub struct EegDinoEncoderBuilder<B: Backend> {
 
 impl<B: Backend> Default for EegDinoEncoderBuilder<B> {
     fn default() -> Self {
-        Self { weights_path: None, config: None, normalization: 100.0, device: None }
+        Self {
+            weights_path: None,
+            config: None,
+            normalization: 100.0,
+            device: None,
+        }
     }
 }
 
@@ -100,12 +105,15 @@ impl<B: Backend> EegDinoEncoderBuilder<B> {
 
     /// Build the encoder, loading weights and creating the on-device cache.
     pub fn build(self) -> Result<EegDinoEncoder<B>> {
-        let weights_path = self.weights_path
+        let weights_path = self
+            .weights_path
             .ok_or_else(|| EegDinoError::Builder("weights path is required".into()))?;
-        let device = self.device
+        let device = self
+            .device
             .ok_or_else(|| EegDinoError::Builder("device is required".into()))?;
 
-        let path_str = weights_path.to_str()
+        let path_str = weights_path
+            .to_str()
             .ok_or_else(|| EegDinoError::Builder("weights path is not valid UTF-8".into()))?;
 
         let cfg = match self.config {
@@ -119,7 +127,13 @@ impl<B: Backend> EegDinoEncoderBuilder<B> {
         let encoder = weights::load_encoder::<B>(&cfg, path_str, &device)?;
         let cache = EmbeddingCache::new(&cfg, &device);
 
-        Ok(EegDinoEncoder { encoder, cache, config: cfg, normalization: self.normalization, device })
+        Ok(EegDinoEncoder {
+            encoder,
+            cache,
+            config: cfg,
+            normalization: self.normalization,
+            device,
+        })
     }
 }
 
@@ -156,7 +170,9 @@ impl<B: Backend> EegDinoEncoder<B> {
     ) -> Result<(Self, f64)> {
         let t0 = Instant::now();
         let mut b = Self::builder().weights(weights_path).device(device);
-        if let Some(c) = config { b = b.config(c); }
+        if let Some(c) = config {
+            b = b.config(c);
+        }
         let enc = b.build()?;
         Ok((enc, t0.elapsed().as_secs_f64() * 1000.0))
     }
@@ -195,15 +211,23 @@ impl<B: Backend> EegDinoEncoder<B> {
         }
 
         let num_patches = num_samples / patch_size;
-        let x = Tensor::<B, 1>::from_floats(signal, &self.device)
-            .reshape([batch_size, num_channels, num_patches, patch_size]);
+        let x = Tensor::<B, 1>::from_floats(signal, &self.device).reshape([
+            batch_size,
+            num_channels,
+            num_patches,
+            patch_size,
+        ]);
         let x = x / self.normalization;
 
         let output = self.encode(x);
         let shape: Vec<usize> = output.dims().to_vec();
         let data: Vec<f32> = output.to_data().convert::<f32>().to_vec().unwrap();
 
-        Ok(EncodingResult { embeddings: data, shape, ms_encode: t0.elapsed().as_secs_f64() * 1000.0 })
+        Ok(EncodingResult {
+            embeddings: data,
+            shape,
+            ms_encode: t0.elapsed().as_secs_f64() * 1000.0,
+        })
     }
 
     /// Encode multiple signals as a single batched tensor (fastest path).
@@ -220,7 +244,8 @@ impl<B: Backend> EegDinoEncoder<B> {
         for (i, s) in signals.iter().enumerate() {
             if s.len() != expected_len {
                 return Err(EegDinoError::InvalidInput(format!(
-                    "signal[{i}] length {} != {expected_len}", s.len()
+                    "signal[{i}] length {} != {expected_len}",
+                    s.len()
                 )));
             }
             flat.extend_from_slice(s);
@@ -235,13 +260,16 @@ impl<B: Backend> EegDinoEncoder<B> {
         num_channels: usize,
         num_samples: usize,
     ) -> Vec<Result<EncodingResult>> {
-        signals.iter()
+        signals
+            .iter()
             .map(|s| self.encode_raw(s, 1, num_channels, num_samples))
             .collect()
     }
 
     /// Reference to the underlying device.
-    pub fn device(&self) -> &B::Device { &self.device }
+    pub fn device(&self) -> &B::Device {
+        &self.device
+    }
 }
 
 // ── Classifier ──────────────────────────────────────────────────────────────
@@ -269,7 +297,8 @@ impl<B: Backend> EegDinoClassifier<B> {
     ) -> Result<(Self, f64)> {
         let t0 = Instant::now();
 
-        let path_str = weights_path.to_str()
+        let path_str = weights_path
+            .to_str()
             .ok_or_else(|| EegDinoError::Builder("weights path is not valid UTF-8".into()))?;
 
         let cfg = match config {
@@ -282,7 +311,16 @@ impl<B: Backend> EegDinoClassifier<B> {
 
         let model = weights::load_classifier::<B>(&cfg, num_classes, path_str, &device)?;
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
-        Ok((Self { model, config: cfg, num_classes, normalization: 100.0, device }, ms))
+        Ok((
+            Self {
+                model,
+                config: cfg,
+                num_classes,
+                normalization: 100.0,
+                device,
+            },
+            ms,
+        ))
     }
 
     /// Classify raw EEG signals.
@@ -303,15 +341,23 @@ impl<B: Backend> EegDinoClassifier<B> {
         }
         let num_patches = num_samples / patch_size;
 
-        let x = Tensor::<B, 1>::from_floats(signal, &self.device)
-            .reshape([batch_size, num_channels, num_patches, patch_size]);
+        let x = Tensor::<B, 1>::from_floats(signal, &self.device).reshape([
+            batch_size,
+            num_channels,
+            num_patches,
+            patch_size,
+        ]);
         let x = x / self.normalization;
 
         let logits = self.model.forward(x);
         let shape: Vec<usize> = logits.dims().to_vec();
         let data: Vec<f32> = logits.to_data().convert::<f32>().to_vec().unwrap();
 
-        Ok(ClassificationResult { logits: data, shape, ms_infer: t0.elapsed().as_secs_f64() * 1000.0 })
+        Ok(ClassificationResult {
+            logits: data,
+            shape,
+            ms_infer: t0.elapsed().as_secs_f64() * 1000.0,
+        })
     }
 
     /// Classify a pre-shaped tensor `[B, C, P, L]`.
@@ -324,7 +370,8 @@ impl<B: Backend> EegDinoClassifier<B> {
 
 /// Detect the model size from a safetensors file without loading all weights.
 pub fn detect_model_size(weights_path: &Path) -> Result<ModelSize> {
-    let path_str = weights_path.to_str()
+    let path_str = weights_path
+        .to_str()
         .ok_or_else(|| EegDinoError::Builder("weights path is not valid UTF-8".into()))?;
     let w = weights::WeightMap::from_file(path_str)?;
     w.detect_model_size()

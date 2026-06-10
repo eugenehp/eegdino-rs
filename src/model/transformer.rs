@@ -1,3 +1,4 @@
+use burn::nn::{LayerNorm, LayerNormConfig};
 /// Transformer encoder layer with pre-norm residual connections.
 ///
 /// Matches the Python `TransformerEncoderLayer` in `models/transformer.py`.
@@ -10,11 +11,10 @@
 ///
 /// DropPath and gamma scaling are training-only and omitted here.
 use burn::prelude::*;
-use burn::nn::{LayerNorm, LayerNormConfig};
 
-use crate::config::ModelConfig;
 use super::attention::Attention;
 use super::mlp::Mlp;
+use crate::config::ModelConfig;
 
 #[derive(Module, Debug)]
 pub struct TransformerEncoderLayer<B: Backend> {

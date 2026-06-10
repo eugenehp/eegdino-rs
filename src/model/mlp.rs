@@ -1,3 +1,4 @@
+use burn::nn::Linear;
 /// Feed-forward MLP with GELU activation.
 ///
 /// Matches the Python `Mlp` class in `models/transformer.py`:
@@ -5,7 +6,6 @@
 ///
 /// Dropout is omitted for inference (eval mode).
 use burn::prelude::*;
-use burn::nn::Linear;
 
 use super::linear_zeros;
 

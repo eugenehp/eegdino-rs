@@ -1,29 +1,36 @@
-/// EEG-DINO encoder inference example.
-///
-/// Usage:
-///   cargo run --release --example infer -- --weights weights/eeg_dino_small.safetensors
-///   cargo run --release --example infer -- --weights weights/eeg_dino_large.safetensors --size large
-///   cargo run --release --example infer --no-default-features --features wgpu -- \
-///       --weights weights/eeg_dino_small.safetensors --device gpu
+//! EEG-DINO encoder inference (RLX).
+//!
+//! ```text
+//! cargo run --release --example infer -- \
+//!     --weights weights/eeg_dino_small.safetensors --device metal
+//! ```
 use std::path::PathBuf;
 
 use clap::Parser;
-use eegdino_rs::{EegDinoEncoder, ModelSize, init_threads};
+use eegdino_rs::prelude::*;
 
 #[derive(Parser)]
-#[command(name = "eegdino-infer", about = "EEG-DINO encoder inference")]
+#[command(name = "eegdino-infer", about = "EEG-DINO encoder inference (RLX)")]
 struct Args {
-    /// Path to the safetensors weight file.
-    #[arg(long)]
+    #[arg(long, default_value = "weights/eeg_dino_small.safetensors")]
     weights: PathBuf,
 
-    /// Model size: small, medium, large.  Auto-detected if omitted.
+    /// Model size: small, medium, large (auto-detected from weights if omitted).
     #[arg(long)]
     size: Option<String>,
 
-    /// Device: cpu, gpu, gpu-f16.
+    /// Backend: cpu | metal | mps | mlx | gpu | wgpu | cuda | rocm | tpu
     #[arg(long, default_value = "cpu")]
     device: String,
+
+    #[arg(long, default_value_t = 1)]
+    batch: usize,
+
+    #[arg(long, default_value_t = 19)]
+    channels: usize,
+
+    #[arg(long, default_value_t = 2000)]
+    samples: usize,
 }
 
 fn parse_size(s: &str) -> anyhow::Result<ModelSize> {
@@ -35,34 +42,39 @@ fn parse_size(s: &str) -> anyhow::Result<ModelSize> {
     }
 }
 
-fn run<B: burn::prelude::Backend>(args: &Args, device: B::Device) -> anyhow::Result<()> {
-    let mut builder = EegDinoEncoder::<B>::builder()
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+    init_threads(None);
+
+    let device = parse_device(&args.device)?;
+    if !is_device_available(device) {
+        anyhow::bail!(
+            "device {:?} ({}) is not available — build with `--features {}`",
+            args.device,
+            device_label(device),
+            feature_for(device),
+        );
+    }
+
+    let mut builder = EegDinoEncoder::builder()
         .weights(&args.weights)
         .device(device);
-
     if let Some(ref s) = args.size {
         builder = builder.size(parse_size(s)?);
     }
+    let mut encoder = builder.build()?;
 
-    let encoder = builder.build()?;
-
-    let cfg = &encoder.config;
     println!(
-        "Loaded {} model (d={}, heads={}, layers={}, ffn={})",
-        match cfg.model_size {
-            ModelSize::Small => "Small",
-            ModelSize::Medium => "Medium",
-            ModelSize::Large => "Large",
-        },
-        cfg.feature_size, cfg.num_heads, cfg.num_layers, cfg.dim_feedforward,
+        "Loaded on {} (d={}, heads={}, layers={})",
+        device_label(device),
+        encoder.cfg.feature_size,
+        encoder.cfg.num_heads,
+        encoder.cfg.num_layers,
     );
 
-    // Encode a dummy 10-second EEG recording (19 channels @ 200 Hz)
-    let num_channels = 19;
-    let num_samples = 2000;
-    let signal = vec![0.0f32; num_channels * num_samples];
-
-    let result = encoder.encode_raw(&signal, 1, num_channels, num_samples)?;
+    let len = args.batch * args.channels * args.samples;
+    let signal = vec![0.0f32; len];
+    let result = encoder.encode_raw(&signal, args.batch, args.channels, args.samples)?;
 
     println!("Output shape: {:?}", result.shape);
     println!("Encode time:  {:.1} ms", result.ms_encode);
@@ -70,37 +82,12 @@ fn run<B: burn::prelude::Backend>(args: &Args, device: B::Device) -> anyhow::Res
     let n = result.embeddings.len().min(8);
     print!("First {n} values: [");
     for (i, v) in result.embeddings[..n].iter().enumerate() {
-        if i > 0 { print!(", "); }
+        if i > 0 {
+            print!(", ");
+        }
         print!("{v:.4}");
     }
     println!("]");
 
     Ok(())
-}
-
-fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
-    init_threads(None);
-
-    match args.device.as_str() {
-        "cpu" => {
-            #[cfg(feature = "ndarray")]
-            { run::<burn::backend::NdArray>(&args, burn::backend::ndarray::NdArrayDevice::Cpu) }
-            #[cfg(not(feature = "ndarray"))]
-            anyhow::bail!("ndarray feature not enabled")
-        }
-        "gpu" => {
-            #[cfg(feature = "wgpu")]
-            { run::<burn::backend::Wgpu>(&args, burn::backend::wgpu::WgpuDevice::default()) }
-            #[cfg(not(feature = "wgpu"))]
-            anyhow::bail!("wgpu feature not enabled")
-        }
-        "gpu-f16" => {
-            #[cfg(feature = "wgpu-f16")]
-            { run::<burn::backend::Wgpu<half::f16, i32>>(&args, burn::backend::wgpu::WgpuDevice::default()) }
-            #[cfg(not(feature = "wgpu-f16"))]
-            anyhow::bail!("wgpu-f16 feature not enabled")
-        }
-        other => anyhow::bail!("unknown device: {other} (expected cpu, gpu, gpu-f16)"),
-    }
 }

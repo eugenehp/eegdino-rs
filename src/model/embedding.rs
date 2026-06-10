@@ -1,3 +1,8 @@
+use burn::module::Ignored;
+use burn::nn::{
+    conv::{Conv2d, Conv2dConfig},
+    GroupNorm, GroupNormConfig, Linear,
+};
 /// Patch embedding layer combining temporal, spectral, and channel embeddings.
 ///
 /// Matches the Python `PatchEmbedding` class from `embedding_{small,medium,large}.py`.
@@ -12,19 +17,13 @@
 ///
 /// A depthwise conv `time_encoding` is added on top.
 use burn::prelude::*;
-use burn::module::Ignored;
-use burn::nn::{
-    Linear,
-    conv::{Conv2d, Conv2dConfig},
-    GroupNorm, GroupNormConfig,
-};
 #[allow(unused_imports)]
 use rayon::prelude::*;
 #[allow(unused_imports)]
-use rustfft::{FftPlanner, num_complex::Complex64};
+use rustfft::{num_complex::Complex64, FftPlanner};
 
-use crate::config::ModelConfig;
 use super::linear_zeros;
+use crate::config::ModelConfig;
 
 // ── Conv-Norm block ─────────────────────────────────────────────────────────
 
@@ -85,7 +84,13 @@ impl<B: Backend> EmbeddingCache<B> {
         }
         let channel_one_hot = Tensor::<B, 1>::from_floats(oh.as_slice(), device).reshape([c, c]);
 
-        Self { dft_cos, dft_sin, channel_one_hot, spectral_bins: k, patch_size: n }
+        Self {
+            dft_cos,
+            dft_sin,
+            channel_one_hot,
+            spectral_bins: k,
+            patch_size: n,
+        }
     }
 }
 
@@ -133,9 +138,18 @@ impl<B: Backend> PatchEmbedding<B> {
         let norm3 = GroupNormConfig::new(g3, c3).init(device);
 
         Self {
-            conv_block1: ConvNormBlock { conv: conv1, norm: norm1 },
-            conv_block2: ConvNormBlock { conv: conv2, norm: norm2 },
-            conv_block3: ConvNormBlock { conv: conv3, norm: norm3 },
+            conv_block1: ConvNormBlock {
+                conv: conv1,
+                norm: norm1,
+            },
+            conv_block2: ConvNormBlock {
+                conv: conv2,
+                norm: norm2,
+            },
+            conv_block3: ConvNormBlock {
+                conv: conv3,
+                norm: norm3,
+            },
             spectral_proj: linear_zeros::<B>(cfg.spectral_bins(), d, true, device),
             channel_embedding: linear_zeros::<B>(cfg.num_channels, d, true, device),
             time_encoding: Conv2dConfig::new([d, d], [1, 5])
@@ -163,9 +177,10 @@ impl<B: Backend> PatchEmbedding<B> {
         let patch_emb = self.conv_block1.forward(x_padded);
         let patch_emb = self.conv_block2.forward(patch_emb);
         let patch_emb = self.conv_block3.forward(patch_emb);
-        let patch_emb = patch_emb
-            .permute([0, 2, 1, 3])
-            .reshape([bz, ch_num, patch_num, self.d_model]);
+        let patch_emb =
+            patch_emb
+                .permute([0, 2, 1, 3])
+                .reshape([bz, ch_num, patch_num, self.d_model]);
 
         // 2. Spectral (cached DFT basis)
         let total = bz * ch_num * patch_num;
@@ -175,13 +190,15 @@ impl<B: Backend> PatchEmbedding<B> {
         let real = flat.clone().matmul(cache.dft_cos.clone().transpose());
         let imag = flat.matmul(cache.dft_sin.clone().transpose());
         let spectral = (real.clone() * real + imag.clone() * imag).sqrt() * inv_n;
-        let spectral_emb = self.spectral_proj
+        let spectral_emb = self
+            .spectral_proj
             .forward(spectral.reshape([bz, ch_num, patch_num, k]));
 
         let mut patch_emb = patch_emb + spectral_emb;
 
         // 3. Channel (cached one-hot)
-        let chan_emb = self.channel_embedding
+        let chan_emb = self
+            .channel_embedding
             .forward(cache.channel_one_hot.clone())
             .unsqueeze::<3>()
             .unsqueeze_dim::<4>(2)
@@ -189,7 +206,8 @@ impl<B: Backend> PatchEmbedding<B> {
         patch_emb = patch_emb + chan_emb;
 
         // 4. Time encoding
-        let time_emb = self.time_encoding
+        let time_emb = self
+            .time_encoding
             .forward(patch_emb.clone().permute([0, 3, 1, 2]))
             .permute([0, 2, 3, 1]);
         patch_emb + time_emb
@@ -207,22 +225,26 @@ impl<B: Backend> PatchEmbedding<B> {
         let patch_emb = self.conv_block1.forward(x_padded);
         let patch_emb = self.conv_block2.forward(patch_emb);
         let patch_emb = self.conv_block3.forward(patch_emb);
-        let patch_emb = patch_emb
-            .permute([0, 2, 1, 3])
-            .reshape([bz, ch_num, patch_num, self.d_model]);
+        let patch_emb =
+            patch_emb
+                .permute([0, 2, 1, 3])
+                .reshape([bz, ch_num, patch_num, self.d_model]);
 
-        let spectral_emb = self.spectral_proj
+        let spectral_emb = self
+            .spectral_proj
             .forward(self.dft_basis.0.apply::<B>(&x, &device));
         let mut patch_emb = patch_emb + spectral_emb;
 
-        let chan_emb = self.channel_embedding
+        let chan_emb = self
+            .channel_embedding
             .forward(self.channel_one_hot.0.to_tensor::<B>(&device))
             .unsqueeze::<3>()
             .unsqueeze_dim::<4>(2)
             .expand([bz, ch_num, patch_num, self.d_model]);
         patch_emb = patch_emb + chan_emb;
 
-        let time_emb = self.time_encoding
+        let time_emb = self
+            .time_encoding
             .forward(patch_emb.clone().permute([0, 3, 1, 2]))
             .permute([0, 2, 3, 1]);
         patch_emb + time_emb
@@ -252,7 +274,11 @@ impl DftBasis {
                 sin_data.push(angle.sin() as f32);
             }
         }
-        Self { cos_data, sin_data, spectral_bins: k }
+        Self {
+            cos_data,
+            sin_data,
+            spectral_bins: k,
+        }
     }
 
     fn apply<B: Backend>(&self, x: &Tensor<B, 4>, device: &B::Device) -> Tensor<B, 4> {
@@ -260,8 +286,10 @@ impl DftBasis {
         let total = bz * ch * p;
         let k = self.spectral_bins;
         let inv_n = 1.0 / n as f32;
-        let cos_basis = Tensor::<B, 1>::from_floats(self.cos_data.as_slice(), device).reshape([k, n]);
-        let sin_basis = Tensor::<B, 1>::from_floats(self.sin_data.as_slice(), device).reshape([k, n]);
+        let cos_basis =
+            Tensor::<B, 1>::from_floats(self.cos_data.as_slice(), device).reshape([k, n]);
+        let sin_basis =
+            Tensor::<B, 1>::from_floats(self.sin_data.as_slice(), device).reshape([k, n]);
         let flat = x.clone().reshape([total, n]);
         let real = flat.clone().matmul(cos_basis.transpose());
         let imag = flat.matmul(sin_basis.transpose());

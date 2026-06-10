@@ -5,14 +5,14 @@
 /// burn `[in, out]` layout, and saves everything as float32.
 use std::collections::HashMap;
 
-use burn::prelude::*;
 use burn::module::{Param, ParamId};
+use burn::prelude::*;
 use safetensors::SafeTensors;
 
 use crate::config::ModelConfig;
 use crate::error::{EegDinoError, Result};
-use crate::model::encoder::EEGEncoder;
 use crate::model::classifier::ClassificationModel;
+use crate::model::encoder::EEGEncoder;
 
 // ── Weight map ──────────────────────────────────────────────────────────────
 
@@ -23,8 +23,8 @@ pub(crate) struct WeightMap {
 impl WeightMap {
     /// Load all tensors from a safetensors file.
     pub fn from_file(path: &str) -> Result<Self> {
-        let bytes = std::fs::read(path)
-            .map_err(|e| EegDinoError::WeightLoad(format!("{path}: {e}")))?;
+        let bytes =
+            std::fs::read(path).map_err(|e| EegDinoError::WeightLoad(format!("{path}: {e}")))?;
         let st = SafeTensors::deserialize(&bytes)
             .map_err(|e| EegDinoError::WeightLoad(format!("{path}: {e}")))?;
         let mut tensors = HashMap::with_capacity(st.len());
@@ -47,13 +47,22 @@ impl WeightMap {
         key: &str,
         device: &B::Device,
     ) -> Result<Tensor<B, D>> {
-        let (data, shape) = self.tensors.remove(key).ok_or_else(|| {
-            EegDinoError::MissingWeight { key: key.to_string() }
-        })?;
+        let (data, shape) =
+            self.tensors
+                .remove(key)
+                .ok_or_else(|| EegDinoError::MissingWeight {
+                    key: key.to_string(),
+                })?;
         let t = Tensor::<B, 1>::from_floats(data.as_slice(), device);
-        let shape_arr: [usize; D] = shape.clone().try_into().map_err(|_| {
-            EegDinoError::ShapeMismatch { key: key.to_string(), expected: D, actual: shape }
-        })?;
+        let shape_arr: [usize; D] =
+            shape
+                .clone()
+                .try_into()
+                .map_err(|_| EegDinoError::ShapeMismatch {
+                    key: key.to_string(),
+                    expected: D,
+                    actual: shape,
+                })?;
         Ok(t.reshape(shape_arr))
     }
 
@@ -71,9 +80,10 @@ impl WeightMap {
     }
 
     pub fn detect_model_size(&self) -> Result<crate::config::ModelSize> {
-        let (_, shape) = self.tensors.get("global_tokens").ok_or_else(|| {
-            EegDinoError::UnknownModelSize("missing global_tokens key".into())
-        })?;
+        let (_, shape) = self
+            .tensors
+            .get("global_tokens")
+            .ok_or_else(|| EegDinoError::UnknownModelSize("missing global_tokens key".into()))?;
         match shape.last().copied() {
             Some(200) => Ok(crate::config::ModelSize::Small),
             Some(512) => Ok(crate::config::ModelSize::Medium),
@@ -132,15 +142,42 @@ fn load_encoder_into<B: Backend>(
     cfg: &ModelConfig,
     device: &B::Device,
 ) -> Result<()> {
-    load_conv_block::<B>(w, &mut enc.patch_embedding.conv_block1, "patch_embedding.proj_in.conv1", "patch_embedding.proj_in.norm1", device)?;
-    load_conv_block::<B>(w, &mut enc.patch_embedding.conv_block2, "patch_embedding.proj_in.conv2", "patch_embedding.proj_in.norm2", device)?;
-    load_conv_block::<B>(w, &mut enc.patch_embedding.conv_block3, "patch_embedding.proj_in.conv3", "patch_embedding.proj_in.norm3", device)?;
+    load_conv_block::<B>(
+        w,
+        &mut enc.patch_embedding.conv_block1,
+        "patch_embedding.proj_in.conv1",
+        "patch_embedding.proj_in.norm1",
+        device,
+    )?;
+    load_conv_block::<B>(
+        w,
+        &mut enc.patch_embedding.conv_block2,
+        "patch_embedding.proj_in.conv2",
+        "patch_embedding.proj_in.norm2",
+        device,
+    )?;
+    load_conv_block::<B>(
+        w,
+        &mut enc.patch_embedding.conv_block3,
+        "patch_embedding.proj_in.conv3",
+        "patch_embedding.proj_in.norm3",
+        device,
+    )?;
 
-    enc.patch_embedding.spectral_proj.weight = w.take_param("patch_embedding.spectral_proj.weight", device)?;
-    enc.patch_embedding.spectral_proj.bias = Some(w.take_param("patch_embedding.spectral_proj.bias", device)?);
-    enc.patch_embedding.channel_embedding.weight = w.take_param("patch_embedding.channel_embedding.weight", device)?;
-    enc.patch_embedding.channel_embedding.bias = Some(w.take_param("patch_embedding.channel_embedding.bias", device)?);
-    enc.patch_embedding.time_encoding = load_conv2d::<B>(w, "patch_embedding.time_encoding", enc.patch_embedding.time_encoding.clone(), device)?;
+    enc.patch_embedding.spectral_proj.weight =
+        w.take_param("patch_embedding.spectral_proj.weight", device)?;
+    enc.patch_embedding.spectral_proj.bias =
+        Some(w.take_param("patch_embedding.spectral_proj.bias", device)?);
+    enc.patch_embedding.channel_embedding.weight =
+        w.take_param("patch_embedding.channel_embedding.weight", device)?;
+    enc.patch_embedding.channel_embedding.bias =
+        Some(w.take_param("patch_embedding.channel_embedding.bias", device)?);
+    enc.patch_embedding.time_encoding = load_conv2d::<B>(
+        w,
+        "patch_embedding.time_encoding",
+        enc.patch_embedding.time_encoding.clone(),
+        device,
+    )?;
 
     enc.global_tokens = w.take_param("global_tokens", device)?;
 
@@ -148,13 +185,15 @@ fn load_encoder_into<B: Backend>(
         let prefix = format!("encoder_layers.{i}");
         let layer = &mut enc.encoder_layers[i];
 
-        layer.norm1 = load_layer_norm::<B>(w, &format!("{prefix}.norm1"), layer.norm1.clone(), device)?;
+        layer.norm1 =
+            load_layer_norm::<B>(w, &format!("{prefix}.norm1"), layer.norm1.clone(), device)?;
         layer.attn.qkv.weight = w.take_param(&format!("{prefix}.attn.qkv.weight"), device)?;
         layer.attn.q_bias = w.take_param(&format!("{prefix}.attn.q_bias"), device)?;
         layer.attn.v_bias = w.take_param(&format!("{prefix}.attn.v_bias"), device)?;
         layer.attn.proj.weight = w.take_param(&format!("{prefix}.attn.proj.weight"), device)?;
         layer.attn.proj.bias = Some(w.take_param(&format!("{prefix}.attn.proj.bias"), device)?);
-        layer.norm2 = load_layer_norm::<B>(w, &format!("{prefix}.norm2"), layer.norm2.clone(), device)?;
+        layer.norm2 =
+            load_layer_norm::<B>(w, &format!("{prefix}.norm2"), layer.norm2.clone(), device)?;
         layer.mlp.fc1.weight = w.take_param(&format!("{prefix}.mlp.fc1.weight"), device)?;
         layer.mlp.fc1.bias = Some(w.take_param(&format!("{prefix}.mlp.fc1.bias"), device)?);
         layer.mlp.fc2.weight = w.take_param(&format!("{prefix}.mlp.fc2.weight"), device)?;

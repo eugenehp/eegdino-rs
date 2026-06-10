@@ -1,3 +1,4 @@
+use burn::nn::Linear;
 /// Classification model: encoder + two-stage pooling + 3-layer MLP head.
 ///
 /// Matches the Python `ClassificationModel` from `run_finetuning.py`.
@@ -7,11 +8,10 @@
 ///   → reshape → channel pool (mean over C) → channel_linear → GELU
 ///   → time pool (mean over P) → classifier MLP → logits
 use burn::prelude::*;
-use burn::nn::Linear;
 
-use crate::config::ModelConfig;
-use super::linear_zeros;
 use super::encoder::EEGEncoder;
+use super::linear_zeros;
+use crate::config::ModelConfig;
 
 #[derive(Module, Debug)]
 pub struct ClassificationModel<B: Backend> {

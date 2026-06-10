@@ -1,3 +1,4 @@
+use burn::module::{Param, ParamId};
 /// EEG-DINO Encoder: patch embedding → transformer layers with global tokens.
 ///
 /// Matches the Python `EEGEncoder` class from `models/eeg_encoder.py`.
@@ -7,11 +8,10 @@
 ///
 /// Global tokens are injected after layer `global_token_layer` (1-indexed).
 use burn::prelude::*;
-use burn::module::{Param, ParamId};
 
-use crate::config::ModelConfig;
 use super::embedding::{EmbeddingCache, PatchEmbedding};
 use super::transformer::TransformerEncoderLayer;
+use crate::config::ModelConfig;
 
 #[derive(Module, Debug)]
 pub struct EEGEncoder<B: Backend> {
@@ -66,7 +66,10 @@ impl<B: Backend> EEGEncoder<B> {
         let seq_len = emb.dims()[1] * emb.dims()[2];
         let mut x = emb.reshape([b, seq_len, d]);
 
-        let global = self.global_tokens.val().expand([b, self.num_global_tokens, d]);
+        let global = self
+            .global_tokens
+            .val()
+            .expand([b, self.num_global_tokens, d]);
 
         for (i, layer) in self.encoder_layers.iter().enumerate() {
             x = layer.forward(x);

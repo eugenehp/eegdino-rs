@@ -1,182 +1,213 @@
-/// Benchmark EEG-DINO encoder latency and throughput across model sizes and
-/// batch sizes.
-///
-/// Usage:
-///   cargo run --release --example bench
-///   cargo run --release --example bench -- --batch 1,2,4,8 --iters 30
-///   cargo run --release --example bench -- --only small
-///   cargo run --release --example bench --features blas-accelerate
-///   cargo run --release --example bench --no-default-features --features wgpu -- --device gpu
-///   cargo run --release --example bench --no-default-features --features wgpu-f16 -- --device gpu-f16
+//! RLX encoder benchmark across backends.
+//!
+//! ```text
+//! cargo run --release --features all-backends --example bench -- \
+//!     --device metal --batch 1,2,4,8
+//! ```
+
+mod common;
+
+use std::env;
+use std::io::Write;
 use std::path::Path;
+use std::process::Command;
 use std::time::Instant;
 
 use clap::Parser;
-use eegdino_rs::{EegDinoEncoder, ModelSize, init_threads};
+use eegdino_rs::prelude::*;
+
+use common::{bench_encode, deterministic_signal, NUM_CHANNELS, NUM_SAMPLES};
+
+/// Auto `--isolate` when any batch in a multi-size sweep exceeds this (VRAM safety).
+const AUTO_ISOLATE_ABOVE: usize = 128;
 
 #[derive(Parser)]
 #[command(name = "eegdino-bench")]
 struct Args {
-    /// Device: cpu, gpu, gpu-f16.
     #[arg(long, default_value = "cpu")]
     device: String,
 
-    /// Comma-separated batch sizes.
+    #[arg(long, default_value = "weights/eeg_dino_small.safetensors")]
+    weights: String,
+
     #[arg(long, default_value = "1,2,4,8")]
     batch: String,
 
-    /// Timed iterations per configuration.
     #[arg(long, default_value_t = 20)]
     iters: usize,
 
-    /// Warmup iterations.
     #[arg(long, default_value_t = 3)]
     warmup: usize,
 
-    /// Only bench a specific size: small, medium, large.
     #[arg(long)]
     only: Option<String>,
+
+    /// Run each batch size in a fresh process (frees GPU memory between shapes).
+    #[arg(long)]
+    isolate: bool,
+
+    /// Emit one JSON object per batch line (for CI / rig trends).
+    #[arg(long)]
+    json: bool,
 }
 
-const NUM_CHANNELS: usize = 19;
-const NUM_SAMPLES: usize = 2000;
-
-fn bench_batch<B: burn::prelude::Backend>(
-    encoder: &EegDinoEncoder<B>,
-    signal: &[f32],
-    batch_size: usize,
-    warmup: usize,
-    iters: usize,
-) -> anyhow::Result<(f64, f64, f64, f64, f64)> {
-    let batched: Vec<f32> = signal.iter().copied().cycle()
-        .take(signal.len() * batch_size).collect();
-
-    // Warmup
-    for _ in 0..warmup {
-        let _ = encoder.encode_raw(&batched, batch_size, NUM_CHANNELS, NUM_SAMPLES)?;
-    }
-
-    // Timed
-    let mut times = Vec::with_capacity(iters);
-    for _ in 0..iters {
-        let t0 = Instant::now();
-        let _ = encoder.encode_raw(&batched, batch_size, NUM_CHANNELS, NUM_SAMPLES)?;
-        times.push(t0.elapsed().as_secs_f64() * 1000.0);
-    }
-
-    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let n = times.len();
-    let mean = times.iter().sum::<f64>() / n as f64;
-    let median = times[n / 2];
-    let min = times[0];
-    let max = *times.last().unwrap();
-    let throughput = (batch_size as f64) * 1000.0 / mean;
-
-    Ok((median, mean, min, max, throughput))
-}
-
-fn run_bench<B: burn::prelude::Backend>(
-    models: &[(&str, ModelSize, &str)],
-    signal: &[f32],
-    device: B::Device,
-    batch_sizes: &[usize],
-    warmup: usize,
-    iters: usize,
-) -> anyhow::Result<()> {
-    for &(name, size, weights_path) in models {
-        if !Path::new(weights_path).exists() {
-            println!("[{name}] SKIP - {weights_path} not found\n");
-            continue;
+fn run_isolated(args: &Args, batch_sizes: &[usize]) -> anyhow::Result<()> {
+    let exe = env::current_exe()?;
+    for &bs in batch_sizes {
+        let mut cmd = Command::new(&exe);
+        cmd.arg("--device")
+            .arg(&args.device)
+            .arg("--weights")
+            .arg(&args.weights)
+            .arg("--batch")
+            .arg(bs.to_string())
+            .arg("--iters")
+            .arg(args.iters.to_string())
+            .arg("--warmup")
+            .arg(args.warmup.to_string());
+        if args.json {
+            cmd.arg("--json");
         }
-
-        let t0 = Instant::now();
-        let encoder = EegDinoEncoder::<B>::builder()
-            .weights(weights_path)
-            .size(size)
-            .device(device.clone())
-            .build()?;
-        let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
-
-        let cfg = &encoder.config;
-        println!("--- {name} (d={}, h={}, L={}, ffn={}) ---",
-            cfg.feature_size, cfg.num_heads, cfg.num_layers, cfg.dim_feedforward);
-        println!("  Load: {load_ms:.1} ms");
-        println!();
-        println!("  {:>5}  {:>10}  {:>10}  {:>10}  {:>10}  {:>12}",
-            "Batch", "Median", "Mean", "Min", "Max", "Throughput");
-
-        for &bs in batch_sizes {
-            let (median, mean, min, max, throughput) =
-                bench_batch::<B>(&encoder, signal, bs, warmup, iters)?;
-            println!("  {:>5}  {:>9.2}ms  {:>9.2}ms  {:>9.2}ms  {:>9.2}ms  {:>8.1} samp/s",
-                bs, median, mean, min, max, throughput);
+        if let Some(ref only) = args.only {
+            cmd.arg("--only").arg(only);
         }
-        println!();
+        let status = cmd.status()?;
+        if !status.success() {
+            anyhow::bail!("isolated bench failed for batch={bs}");
+        }
     }
-
     Ok(())
+}
+
+fn should_auto_isolate(batch_sizes: &[usize]) -> bool {
+    batch_sizes.len() > 1 && batch_sizes.iter().any(|&b| b > AUTO_ISOLATE_ABOVE)
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     init_threads(None);
 
-    let batch_sizes: Vec<usize> = args.batch
+    let mut batch_sizes: Vec<usize> = args
+        .batch
         .split(',')
-        .map(|s| s.trim().parse::<usize>())
-        .collect::<Result<_, _>>()?;
+        .map(|s| s.trim().parse())
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    batch_sizes.sort_by(|a, b| b.cmp(a));
 
-    let all_models: Vec<(&str, ModelSize, &str)> = vec![
-        ("Small", ModelSize::Small, "weights/eeg_dino_small.safetensors"),
-        ("Medium", ModelSize::Medium, "weights/eeg_dino_medium.safetensors"),
-        ("Large", ModelSize::Large, "weights/eeg_dino_large.safetensors"),
+    let isolate = args.isolate || should_auto_isolate(&batch_sizes);
+    if isolate && batch_sizes.len() > 1 {
+        if !args.isolate && !args.json {
+            eprintln!(
+                "note: auto --isolate (batch > {AUTO_ISOLATE_ABOVE} in multi-batch sweep)"
+            );
+        }
+        return run_isolated(&args, &batch_sizes);
+    }
+
+    let device = parse_device(&args.device)?;
+    if !is_device_available(device) {
+        anyhow::bail!(
+            "device {} ({}) is not available — compile with `--features {}`",
+            args.device,
+            device_label(device),
+            feature_for(device),
+        );
+    }
+
+    let models = [
+        (
+            "Small",
+            ModelSize::Small,
+            "weights/eeg_dino_small.safetensors",
+        ),
+        (
+            "Medium",
+            ModelSize::Medium,
+            "weights/eeg_dino_medium.safetensors",
+        ),
+        (
+            "Large",
+            ModelSize::Large,
+            "weights/eeg_dino_large.safetensors",
+        ),
     ];
 
-    let models: Vec<_> = match &args.only {
-        Some(f) => {
-            let f = f.to_lowercase();
-            all_models.into_iter().filter(|(n, _, _)| n.to_lowercase() == f).collect()
-        }
-        None => all_models,
-    };
+    if !args.json {
+        println!("EEG-DINO RLX Benchmark");
+        println!("  Device:  {} ({})", args.device, device_label(device));
+        println!("  Input:   {NUM_CHANNELS} ch × {NUM_SAMPLES} samples");
+        println!("  Batches: {:?}", batch_sizes);
+        println!("  Warmup:  {}, Timed: {}", args.warmup, args.iters);
+        println!();
+    }
 
-    let signal: Vec<f32> = (0..NUM_CHANNELS * NUM_SAMPLES)
-        .map(|i| ((i as f32) * 0.001).sin() * 50.0)
-        .collect();
+    for (name, _size, path) in models {
+        if let Some(ref only) = args.only {
+            if name.to_lowercase() != only.to_lowercase() {
+                continue;
+            }
+        }
+        if !Path::new(path).exists() {
+            if args.json {
+                println!(
+                    r#"{{"model":"{name}","skipped":true,"reason":"weights missing"}}"#
+                );
+            } else {
+                println!("[{name}] SKIP — {path} not found\n");
+            }
+            continue;
+        }
 
-    println!("EEG-DINO Inference Benchmark");
-    println!("  Device:  {}", args.device);
-    println!("  Input:   {NUM_CHANNELS} ch x {NUM_SAMPLES} samples (10 s @ 200 Hz)");
-    println!("  Batches: {:?}", batch_sizes);
-    println!("  Warmup:  {}, Timed: {}", args.warmup, args.iters);
-    println!();
+        let t0 = Instant::now();
+        let mut enc = EegDinoEncoder::builder()
+            .weights(path)
+            .device(device)
+            .max_cached_shapes(1)
+            .build()?;
+        let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-    match args.device.as_str() {
-        "cpu" => {
-            #[cfg(feature = "ndarray")]
-            { run_bench::<burn::backend::NdArray>(&models, &signal,
-                burn::backend::ndarray::NdArrayDevice::Cpu,
-                &batch_sizes, args.warmup, args.iters)? }
-            #[cfg(not(feature = "ndarray"))]
-            anyhow::bail!("ndarray feature not enabled");
+        if !args.json {
+            println!("--- {name} (d={}) ---", enc.cfg.feature_size);
+            println!("  Load: {load_ms:.1} ms");
+            println!();
+            println!(
+                "  {:>5}  {:>10}  {:>10}  {:>10}  {:>12}",
+                "Batch", "Median", "Mean", "Min", "Throughput"
+            );
         }
-        "gpu" => {
-            #[cfg(feature = "wgpu")]
-            { run_bench::<burn::backend::Wgpu>(&models, &signal,
-                burn::backend::wgpu::WgpuDevice::default(),
-                &batch_sizes, args.warmup, args.iters)? }
-            #[cfg(not(feature = "wgpu"))]
-            anyhow::bail!("wgpu feature not enabled");
+
+        let mut out_buf = Vec::new();
+
+        for &bs in &batch_sizes {
+            enc.clear_cache();
+            let signal = deterministic_signal(bs);
+            enc.encode_raw_into(&signal, bs, NUM_CHANNELS, NUM_SAMPLES, &mut out_buf)?;
+            let (median, mean, min) = bench_encode(args.warmup, args.iters, || {
+                enc.encode_raw_into(&signal, bs, NUM_CHANNELS, NUM_SAMPLES, &mut out_buf)?;
+                Ok(())
+            });
+            let throughput = (bs as f64) * 1000.0 / mean;
+            if args.json {
+                let line = format!(
+                    r#"{{"model":"{name}","device":"{}","batch":{bs},"median_ms":{median:.4},"mean_ms":{mean:.4},"min_ms":{min:.4},"throughput_samp_s":{throughput:.2},"channels":{NUM_CHANNELS},"samples":{NUM_SAMPLES}}}"#,
+                    args.device
+                );
+                println!("{line}");
+            } else {
+                println!(
+                    "  {:>5}  {:>9.2}ms  {:>9.2}ms  {:>9.2}ms  {:>8.1} samp/s",
+                    bs, median, mean, min, throughput
+                );
+            }
+            enc.clear_cache();
         }
-        "gpu-f16" => {
-            #[cfg(feature = "wgpu-f16")]
-            { run_bench::<burn::backend::Wgpu<half::f16, i32>>(&models, &signal,
-                burn::backend::wgpu::WgpuDevice::default(),
-                &batch_sizes, args.warmup, args.iters)? }
-            #[cfg(not(feature = "wgpu-f16"))]
-            anyhow::bail!("wgpu-f16 feature not enabled");
+        if !args.json {
+            println!();
         }
-        other => anyhow::bail!("unknown device: {other} (expected cpu, gpu, gpu-f16)"),
+    }
+
+    if args.json {
+        std::io::stdout().flush()?;
     }
 
     Ok(())
